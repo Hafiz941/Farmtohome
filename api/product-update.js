@@ -126,6 +126,7 @@ async function handleSubscription(sub, product) {
 
   try {
     // 🔴 OPTION: Remove subscription
+    /*
     await axios.delete(
       `https://api.rechargeapps.com/subscriptions/${subscriptionId}`,
       {
@@ -134,7 +135,7 @@ async function handleSubscription(sub, product) {
         },
       }
     );
-
+   */
     console.log(`❌ Removed subscription ${subscriptionId}`);
 
     // 📩 Notify customer

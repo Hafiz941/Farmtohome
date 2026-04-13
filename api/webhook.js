@@ -4,7 +4,7 @@ export default async function handler(req, res) {
   
       console.log("Shopify order received:", order.id);
   
-      // ✅ Better Recharge detection
+      // ✅ Detect Recharge subscription order
       const isRecharge =
         order.source_name === "subscription_contract" ||
         order.tags?.toLowerCase().includes("subscription");
@@ -13,8 +13,22 @@ export default async function handler(req, res) {
         return res.status(200).send("Not a subscription order");
       }
   
-      // ✅ Calculate delivery date
-      const deliveryDate = getDeliveryDate();
+      // ✅ Extract delivery info from original order
+      const attributes = order.note_attributes || [];
+  
+      const deliveryDay =
+        attributes.find(a => a.name === "delivery_day")?.value;
+  
+      const deliveryTime =
+        attributes.find(a => a.name === "delivery_time")?.value;
+  
+      // ✅ Fallback (for old subscriptions)
+      const finalDelivery = calculateNextDelivery(
+        (deliveryDay || "wednesday").toLowerCase(),
+        deliveryTime || "19:00-21:00"
+      );
+  
+      console.log("Final Delivery:", finalDelivery);
   
       // ✅ Update Shopify order
       await fetch(`https://${process.env.SHOPIFY_STORE}/admin/api/2023-10/orders/${order.id}.json`, {
@@ -27,7 +41,10 @@ export default async function handler(req, res) {
           order: {
             id: order.id,
             note_attributes: [
-              { name: "Delivery date", value: deliveryDate }
+              {
+                name: "Delivery date",
+                value: finalDelivery
+              }
             ]
           }
         })
@@ -43,30 +60,44 @@ export default async function handler(req, res) {
   
   
   /* =========================
-     DELIVERY DATE LOGIC
+     DELIVERY LOGIC
   ========================= */
   
-  function getDeliveryDate() {
+  function calculateNextDelivery(day, time) {
     const today = new Date();
-    const day = today.getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+    const currentDay = today.getDay(); // 0=Sun ... 6=Sat
   
-    let addWeeks = 0;
+    const daysMap = {
+      wednesday: 3,
+      thursday: 4,
+      friday: 5
+    };
   
-    // 👉 YOUR RULE
-    if (day === 2) {
-      // Tuesday → skip next week
-      addWeeks = 2;
-    } else {
-      // Wed → Mon → next week
-      addWeeks = 1;
-    }
+    const dayNames = {
+      wednesday: "Wednesday",
+      thursday: "Thursday",
+      friday: "Friday"
+    };
   
-    // 👉 Always base from next Wednesday
-    const nextWednesday = getNextWeekday(today, 3); // 3 = Wed
+    const targetDay = daysMap[day] || 3; // default Wednesday
   
-    nextWednesday.setDate(nextWednesday.getDate() + (addWeeks - 1) * 7);
+    // ✅ YOUR BUSINESS RULE
+    let addWeeks = (currentDay === 2) ? 2 : 1;
   
-    return formatDate(nextWednesday);
+    // ✅ Get next target weekday
+    let deliveryDate = getNextWeekday(today, targetDay);
+  
+    // ✅ Apply week offset
+    deliveryDate.setDate(
+      deliveryDate.getDate() + (addWeeks - 1) * 7
+    );
+  
+    const formattedDate = deliveryDate.toLocaleDateString("en-GB", {
+      day: "2-digit",
+      month: "long"
+    });
+  
+    return `${dayNames[day]} (${time}) - ${formattedDate}`;
   }
   
   
@@ -77,16 +108,12 @@ export default async function handler(req, res) {
   function getNextWeekday(date, targetDay) {
     const d = new Date(date);
     const current = d.getDay();
-    let diff = (targetDay - current + 7) % 7;
-    if (diff === 0) diff = 7;
-    d.setDate(d.getDate() + diff);
-    return d;
-  }
   
-  function formatDate(d) {
-    return d.toLocaleDateString("en-GB", {
-      day: "2-digit",
-      month: "short",
-      year: "numeric"
-    });
+    let diff = (targetDay - current + 7) % 7;
+  
+    if (diff === 0) diff = 7;
+  
+    d.setDate(d.getDate() + diff);
+  
+    return d;
   }

@@ -1,90 +1,92 @@
 export default async function handler(req, res) {
-    if (req.method !== "POST") {
-      return res.status(405).end();
-    }
+    try {
+      const order = req.body;
   
-    const charge = req.body;
+      console.log("Shopify order received:", order.id);
   
-    // ✅ Extract data
-    const chargeDate = charge.scheduled_at;
+      // ✅ Better Recharge detection
+      const isRecharge =
+        order.source_name === "subscription_contract" ||
+        order.tags?.toLowerCase().includes("subscription");
   
-    const deliveryDay =
-      charge.line_items?.[0]?.properties?.delivery_day;
-  
-    const deliveryTime =
-      charge.line_items?.[0]?.properties?.delivery_time;
-  
-    if (!deliveryDay || !deliveryTime) {
-      return res.status(200).end();
-    }
-  
-    // ✅ YOUR LOGIC
-    function getDeliveryDate(orderDate, selectedDay) {
-      const date = new Date(orderDate);
-      const day = date.getDay();
-  
-      const daysMap = {
-        wednesday: 3,
-        thursday: 4,
-        friday: 5
-      };
-  
-      const targetDay = daysMap[selectedDay];
-  
-      let delivery = new Date(date);
-      const diff = (targetDay - day + 7) % 7;
-  
-      delivery.setDate(date.getDate() + diff);
-  
-      // Always next week
-      delivery.setDate(delivery.getDate() + 7);
-  
-      // Tuesday rule
-      if (day === 2) {
-        delivery.setDate(delivery.getDate() + 7);
+      if (!isRecharge) {
+        return res.status(200).send("Not a subscription order");
       }
   
-      return delivery;
+      // ✅ Calculate delivery date
+      const deliveryDate = getDeliveryDate();
+  
+      // ✅ Update Shopify order
+      await fetch(`https://${process.env.SHOPIFY_STORE}/admin/api/2023-10/orders/${order.id}.json`, {
+        method: "PUT",
+        headers: {
+          "X-Shopify-Access-Token": process.env.SHOPIFY_TOKEN,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          order: {
+            id: order.id,
+            note_attributes: [
+              { name: "Delivery date", value: deliveryDate }
+            ]
+          }
+        })
+      });
+  
+      res.status(200).send("Updated");
+  
+    } catch (err) {
+      console.error("Webhook error:", err);
+      res.status(500).send("Error");
+    }
+  }
+  
+  
+  /* =========================
+     DELIVERY DATE LOGIC
+  ========================= */
+  
+  function getDeliveryDate() {
+    const today = new Date();
+    const day = today.getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+  
+    let addWeeks = 0;
+  
+    // 👉 YOUR RULE
+    if (day === 2) {
+      // Tuesday → skip next week
+      addWeeks = 2;
+    } else {
+      // Wed → Mon → next week
+      addWeeks = 1;
     }
   
-    const finalDate = getDeliveryDate(chargeDate, deliveryDay);
+    // 👉 Always base from next Wednesday
+    const nextWednesday = getNextWeekday(today, 3); // 3 = Wed
   
-    // ✅ Format string
-    const dayNames = {
-      wednesday: "Wednesday",
-      thursday: "Thursday",
-      friday: "Friday"
-    };
+    nextWednesday.setDate(nextWednesday.getDate() + (addWeeks - 1) * 7);
   
-    const formattedDate = finalDate.toLocaleDateString("en-GB", {
+    return formatDate(nextWednesday);
+  }
+  
+  
+  /* =========================
+     HELPERS
+  ========================= */
+  
+  function getNextWeekday(date, targetDay) {
+    const d = new Date(date);
+    const current = d.getDay();
+    let diff = (targetDay - current + 7) % 7;
+    if (diff === 0) diff = 7;
+    d.setDate(d.getDate() + diff);
+    return d;
+  }
+  
+  function formatDate(d) {
+    return d.toLocaleDateString("en-GB", {
       day: "2-digit",
-      month: "long"
+      month: "short",
+      year: "numeric"
     });
-  
-    const finalDelivery =
-      `${dayNames[deliveryDay]} (${deliveryTime}) - ${formattedDate}`;
-  
-    console.log("Final:", finalDelivery);
-  
-    // ✅ UPDATE SHOPIFY ORDER
-    await fetch(`https://YOUR-STORE.myshopify.com/admin/api/2024-01/orders/${charge.shopify_order_id}.json`, {
-      method: "PUT",
-      headers: {
-        "X-Shopify-Access-Token": "YOUR_ADMIN_API_TOKEN",
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        order: {
-          id: charge.shopify_order_id,
-          note_attributes: [
-            {
-              name: "Delivery date",
-              value: finalDelivery
-            }
-          ]
-        }
-      })
-    });
-  
-    res.status(200).json({ success: true });
   }

@@ -1,5 +1,6 @@
 import axios from "axios";
 import crypto from "crypto";
+import nodemailer from "nodemailer";
 
 // ================= ENV =================
 const SHOPIFY_API_VERSION = "2024-01";
@@ -8,6 +9,16 @@ const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_TOKEN;
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
 const delay = (ms) => new Promise(res => setTimeout(res, ms));
+const notifiedCustomers = new Set();
+
+// ================= EMAIL SETUP =================
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
 
 // ================= CACHE =================
 let productCache = null;
@@ -181,6 +192,42 @@ export default async function handler(req, res) {
   }
 }
 
+// ================= SEND EMAIL =================
+async function sendEmailNotification(email, oldProduct, newProduct) {
+  try {
+    await transporter.sendMail({
+      from: `"Farm to Home" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject: "Update to Your Subscription",
+      html: `
+        <p>Hello,</p>
+
+        <p>We’ve updated one of your subscription item:</p>
+
+        <p><strong>${oldProduct}</strong></p>
+
+        <p>It has been replaced with:</p>
+
+        <p><strong>${newProduct}</strong></p>
+
+        <p>
+          You can manage your subscription here:
+          <br/>
+          <a href="https://farmtohome.pt/account/login">
+            Manage your subscription
+          </a>
+        </p>
+
+        <p>Thanks 💚</p>
+      `,
+    });
+
+    console.log("📧 Email sent to", email);
+  } catch (err) {
+    console.error("❌ Email failed:", err.message);
+  }
+}
+
 // ================= PROCESS RECHARGE =================
 async function processRecharge(product, replacement) {
   let page = 1;
@@ -219,7 +266,21 @@ async function processRecharge(product, replacement) {
       }
     
       await swapSubscription(sub, replacement);
-      await delay(200); // keep your rate safety
+      // ✅ SEND EMAIL (only once per customer)
+      if (
+        sub.customer_email &&
+        !notifiedCustomers.has(sub.customer_email)
+      ) {
+        await sendEmailNotification(
+          sub.customer_email,
+          sub.product_title,
+          replacement.title
+        );
+
+        notifiedCustomers.add(sub.customer_email);
+      }
+
+      await delay(200);
     }
     page++;
   }

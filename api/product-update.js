@@ -211,8 +211,10 @@ async function processRecharge(product) {
     const subs = res.data.subscriptions || [];
     if (!subs.length) break;
 
+    const delay = (ms) => new Promise(res => setTimeout(res, ms));
     for (const sub of subs) {
       await swapSubscription(sub, replacement);
+      await delay(200); // 🔥 increase to 200ms
     }
 
     page++;
@@ -290,25 +292,42 @@ async function updateQueuedOrders(product, replacement) {
 async function swapSubscription(sub, replacement) {
   console.log("🔄 Swapping sub:", sub.id);
 
-  try {
-    await axios.put(
-      `https://api.rechargeapps.com/subscriptions/${sub.id}`,
-      {
-        shopify_product_id: replacement.product_id,
-        shopify_variant_id: replacement.variant_id,
-      },
-      {
-        headers: {
-          "X-Recharge-Access-Token": RECHARGE_API_KEY,
+  let attempts = 0;
+  const maxAttempts = 3;
+
+  while (attempts < maxAttempts) {
+    try {
+      await axios.put(
+        `https://api.rechargeapps.com/subscriptions/${sub.id}`,
+        {
+          shopify_product_id: replacement.product_id,
+          shopify_variant_id: replacement.variant_id,
         },
+        {
+          headers: {
+            "X-Recharge-Access-Token": RECHARGE_API_KEY,
+          },
+        }
+      );
+
+      console.log(`✅ Subscription swapped → ${replacement.title}`);
+      return;
+
+    } catch (err) {
+      const errorMsg = err.response?.data?.error || err.message;
+
+      if (errorMsg?.includes("already in progress")) {
+        console.log(`⏳ Retry ${attempts + 1} for sub ${sub.id}`);
+        await delay(300);
+        attempts++;
+      } else {
+        console.error("❌ Swap failed:", err.response?.data || err.message);
+        return;
       }
-    );
-
-    console.log(`✅ Subscription swapped → ${replacement.title}`);
-
-  } catch (err) {
-    console.error("❌ Swap failed:", err.response?.data || err.message);
+    }
   }
+
+  console.error(`❌ Failed after retries for sub ${sub.id}`);
 }
 // ================= FIND REPLACEMENT =================
 async function findReplacementProduct(product) {

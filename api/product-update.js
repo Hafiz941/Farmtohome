@@ -107,7 +107,7 @@ async function getProducts() {
   while (url) {
     const res = await axios.get(url, {
       headers: {
-        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+        "X-Shopify-Access-Token": String(SHOPIFY_ACCESS_TOKEN).trim(),
       },
       timeout: 10000,
     });
@@ -139,6 +139,7 @@ export default async function handler(req, res) {
     const rawBody = await getRawBody(req);
     const hmac = req.headers["x-shopify-hmac-sha256"];
 
+    // 🔐 Verify webhook
     if (!hmac) {
       return res.status(401).send("Missing HMAC");
     }
@@ -149,6 +150,7 @@ export default async function handler(req, res) {
 
     const product = JSON.parse(rawBody.toString());
 
+    // 🎯 Only process inactive products
     const isInactive =
       product.status === "archived" ||
       product.status === "draft";
@@ -157,19 +159,39 @@ export default async function handler(req, res) {
 
     console.log("🚨 Inactive product:", product.title);
 
-    await processRecharge(product);
+    // ✅ STEP 1 — Find replacement ONCE
+    const replacement = await findReplacementProduct(product);
 
-    res.status(200).json({ success: true });
+    if (!replacement) {
+      console.log("❌ No replacement found → exiting safely");
+      return res.status(200).end();
+    }
+
+    // ✅ STEP 2 — Update all subscriptions
+    await processRecharge(product, replacement);
+
+    // ✅ STEP 3 — Update future queued orders
+    await updateQueuedOrders(product, replacement);
+
+    return res.status(200).json({ success: true });
 
   } catch (err) {
     console.error("❌ Webhook error:", err);
-    res.status(500).end();
+    return res.status(500).end();
   }
 }
 
 // ================= PROCESS RECHARGE =================
 async function processRecharge(product) {
   let page = 1;
+
+  // ✅ get replacement ONCE
+  const replacement = await findReplacementProduct(product);
+
+  if (!replacement) {
+    console.log("❌ No replacement found for any subscription");
+    return;
+  }
 
   while (true) {
     const res = await axios.get(
@@ -190,25 +212,85 @@ async function processRecharge(product) {
     if (!subs.length) break;
 
     for (const sub of subs) {
-      await swapSubscription(sub, product);
+      await swapSubscription(sub, replacement);
     }
 
     page++;
   }
 }
 
+// ================= UPDATE FUTURE ORDERS =================
+async function updateQueuedOrders(product, replacement) {
+  try {
+    let page = 1;
+
+    while (true) {
+      const res = await axios.get(
+        "https://api.rechargeapps.com/orders",
+        {
+          headers: {
+            "X-Recharge-Access-Token": RECHARGE_API_KEY,
+          },
+          params: {
+            status: "QUEUED",
+            limit: 250,
+            page,
+          },
+        }
+      );
+
+      const orders = res.data.orders || [];
+      if (!orders.length) break;
+
+      for (const order of orders) {
+        let updated = false;
+
+        const newLineItems = order.line_items.map(item => {
+          if (item.shopify_product_id == product.id) {
+            updated = true;
+
+            console.log(`🔄 Updating order ${order.id}`);
+
+            return {
+              ...item,
+              shopify_product_id: replacement.product_id,
+              shopify_variant_id: replacement.variant_id,
+              title: replacement.title,
+            };
+          }
+          return item;
+        });
+
+        if (updated) {
+          await axios.put(
+            `https://api.rechargeapps.com/orders/${order.id}`,
+            {
+              line_items: newLineItems,
+            },
+            {
+              headers: {
+                "X-Recharge-Access-Token": RECHARGE_API_KEY,
+              },
+            }
+          );
+
+          console.log(`✅ Updated queued order ${order.id}`);
+        }
+      }
+
+      page++;
+    }
+
+  } catch (err) {
+    console.error("❌ Failed updating queued orders:", err.response?.data || err.message);
+  }
+}
+
 // ================= SWAP =================
-async function swapSubscription(sub, product) {
+async function swapSubscription(sub, replacement) {
   console.log("🔄 Swapping sub:", sub.id);
 
   try {
-    const replacement = await findReplacementProduct(product);
-
-    if (!replacement) {
-      console.log("❌ No replacement found");
-      return;
-    }
-
     await axios.put(
       `https://api.rechargeapps.com/subscriptions/${sub.id}`,
       {
@@ -222,13 +304,12 @@ async function swapSubscription(sub, product) {
       }
     );
 
-    console.log(`✅ Swapped → ${replacement.title}`);
+    console.log(`✅ Subscription swapped → ${replacement.title}`);
 
   } catch (err) {
     console.error("❌ Swap failed:", err.response?.data || err.message);
   }
 }
-
 // ================= FIND REPLACEMENT =================
 async function findReplacementProduct(product) {
   try {
@@ -240,7 +321,7 @@ async function findReplacementProduct(product) {
 
     return {
       product_id: match.id,
-      variant_id: match.variants[0]?.id,
+      variant_id: match.variants?.[0]?.id || null,
       title: match.title,
     };
 

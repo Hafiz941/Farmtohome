@@ -7,6 +7,7 @@ const RECHARGE_API_KEY = process.env.RECHARGE_API_KEY;
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_TOKEN;
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
+const delay = (ms) => new Promise(res => setTimeout(res, ms));
 
 // ================= CACHE =================
 let productCache = null;
@@ -207,8 +208,6 @@ async function processRecharge(product, replacement) {
 
     const subs = res.data.subscriptions || [];
     if (!subs.length) break;
-
-    const delay = (ms) => new Promise(res => setTimeout(res, ms));
     for (const sub of subs) {
       if (String(sub.shopify_product_id) !== String(product.id)) {
         continue;

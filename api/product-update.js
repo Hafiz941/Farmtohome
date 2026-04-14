@@ -130,6 +130,9 @@ async function swapSubscription(sub, product) {
 // 🔍 Find replacement from Shopify
 async function findReplacementProduct(product) {
   try {
+    console.log("STORE:", SHOPIFY_STORE);
+    console.log("TOKEN exists:", !!SHOPIFY_ACCESS_TOKEN);
+    console.log("TOKEN preview:", SHOPIFY_ACCESS_TOKEN?.slice(0, 10));
     const tags = product.tags; // e.g. "vegan,pescatarian"
 
     const res = await axios.get(

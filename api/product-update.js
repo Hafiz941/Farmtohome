@@ -7,6 +7,8 @@ const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
 
+console.log("STORE:", SHOPIFY_STORE);
+console.log("TOKEN exists:", !!SHOPIFY_ACCESS_TOKEN);
 // Disable body parser
 export const config = {
   api: { bodyParser: false },

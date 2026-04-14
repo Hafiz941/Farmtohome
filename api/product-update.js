@@ -3,7 +3,6 @@ import crypto from "crypto";
 
 // ================= ENV =================
 const SHOPIFY_API_VERSION = "2024-01";
-
 const RECHARGE_API_KEY = process.env.RECHARGE_API_KEY;
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_TOKEN;
@@ -182,11 +181,8 @@ export default async function handler(req, res) {
 }
 
 // ================= PROCESS RECHARGE =================
-async function processRecharge(product) {
+async function processRecharge(product, replacement) {
   let page = 1;
-
-  // ✅ get replacement ONCE
-  const replacement = await findReplacementProduct(product);
 
   if (!replacement) {
     console.log("❌ No replacement found for any subscription");
@@ -213,10 +209,12 @@ async function processRecharge(product) {
 
     const delay = (ms) => new Promise(res => setTimeout(res, ms));
     for (const sub of subs) {
+      if (String(sub.shopify_product_id) !== String(product.id)) {
+        continue; // 🔥 skip unrelated subscriptions
+      } 
       await swapSubscription(sub, replacement);
-      await delay(200); // 🔥 increase to 200ms
+      await delay(200); // 🔥 REQUIRED
     }
-
     page++;
   }
 }
@@ -246,9 +244,9 @@ async function updateQueuedOrders(product, replacement) {
 
       for (const order of orders) {
         let updated = false;
-
+        const targetId = String(product.id);
         const newLineItems = order.line_items.map(item => {
-          if (item.shopify_product_id == product.id) {
+            if (String(item.shopify_product_id) === targetId) {
             updated = true;
 
             console.log(`🔄 Updating order ${order.id}`);
@@ -257,7 +255,7 @@ async function updateQueuedOrders(product, replacement) {
               ...item,
               shopify_product_id: replacement.product_id,
               shopify_variant_id: replacement.variant_id,
-              title: replacement.title,
+              quantity: item.quantity, // 🔥 explicit safety
             };
           }
           return item;
@@ -276,6 +274,7 @@ async function updateQueuedOrders(product, replacement) {
             }
           );
 
+          await delay(200); // 🔥 add this
           console.log(`✅ Updated queued order ${order.id}`);
         }
       }
@@ -302,6 +301,7 @@ async function swapSubscription(sub, replacement) {
         {
           shopify_product_id: replacement.product_id,
           shopify_variant_id: replacement.variant_id,
+          quantity: sub.quantity, // 🔥 preserve quantity
         },
         {
           headers: {
@@ -309,7 +309,7 @@ async function swapSubscription(sub, replacement) {
           },
         }
       );
-
+      await delay(200); // 🔥 add this
       console.log(`✅ Subscription swapped → ${replacement.title}`);
       return;
 
@@ -335,8 +335,13 @@ async function findReplacementProduct(product) {
     const products = await getProducts();
 
     const match = findBestMatch(products, product);
-
     if (!match) return null;
+
+    // 🔥 ADD THIS HERE
+    if (!match.variants?.length) {
+      console.log("⚠️ No variants found → skipping");
+      return null;
+    }
 
     return {
       product_id: match.id,

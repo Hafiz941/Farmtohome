@@ -267,19 +267,20 @@ async function processRecharge(product, replacement) {
     
       await swapSubscription(sub, replacement);
       // ✅ SEND EMAIL (only once per customer)
+      const customerEmail = sub.email;
+      console.log("📩 Subscription email:", sub.email);
       if (
-        sub.customer_email &&
-        !notifiedCustomers.has(sub.customer_email)
+        customerEmail &&
+        !notifiedCustomers.has(customerEmail)
       ) {
         await sendEmailNotification(
-          sub.customer_email,
+          customerEmail,
           sub.product_title,
           replacement.title
         );
 
-        notifiedCustomers.add(sub.customer_email);
+        notifiedCustomers.add(customerEmail);
       }
-
       await delay(200);
     }
     page++;

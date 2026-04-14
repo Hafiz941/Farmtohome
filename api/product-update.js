@@ -6,7 +6,7 @@ const SHOPIFY_API_VERSION = "2024-01";
 
 const RECHARGE_API_KEY = process.env.RECHARGE_API_KEY;
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
-const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
+const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_TOKEN;
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
 
 // ================= CACHE =================

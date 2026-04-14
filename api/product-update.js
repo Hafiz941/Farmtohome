@@ -198,9 +198,10 @@ async function processRecharge(product, replacement) {
         },
         params: {
           shopify_product_id: product.id,
+          status: "ACTIVE", // 🔥 filter directly
           limit: 250,
           page,
-        },
+        }
       }
     );
 
@@ -210,10 +211,16 @@ async function processRecharge(product, replacement) {
     const delay = (ms) => new Promise(res => setTimeout(res, ms));
     for (const sub of subs) {
       if (String(sub.shopify_product_id) !== String(product.id)) {
-        continue; // 🔥 skip unrelated subscriptions
-      } 
+        continue;
+      }
+    
+      if (sub.status !== "ACTIVE") {
+        console.log(`⏭️ Skipping non-active sub ${sub.id} (${sub.status})`);
+        continue;
+      }
+    
       await swapSubscription(sub, replacement);
-      await delay(200); // 🔥 REQUIRED
+      await delay(200); // keep your rate safety
     }
     page++;
   }

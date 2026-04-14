@@ -89,8 +89,11 @@ function findBestMatch(products, currentProduct) {
 
 // ================= PRODUCT FETCH (CACHED + PAGINATION) =================
 async function getProducts() {
+  console.log("👉 STORE:", SHOPIFY_STORE);
+  console.log("👉 TOKEN exists:", !!SHOPIFY_ACCESS_TOKEN);
+  console.log("👉 TOKEN preview:", SHOPIFY_ACCESS_TOKEN?.slice(0, 8));
   const now = Date.now();
-
+  
   if (productCache && now - lastFetchTime < CACHE_TTL) {
     console.log("⚡ Using cached products");
     return productCache;

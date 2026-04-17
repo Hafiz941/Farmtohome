@@ -86,14 +86,35 @@ function findBestMatch(products, currentProduct) {
     }
   }
 
-  // 🎯 FINAL FALLBACK (VERY IMPORTANT)
-  if (!bestMatch) {
-    console.log("⚠️ No tag match → using fallback product");
+      // 🎯 CATEGORY FALLBACK (SAFE)
+    if (!bestMatch) {
+      console.log("⚠️ No tag match → trying category fallback");
 
-    bestMatch = products.find(p =>
-      p.status === "active" && p.id !== currentProduct.id
-    );
-  }
+      // 👉 Define your categories here
+      const allowedCategories = ["soup", "meal", "salad"];
+
+      // 👉 Find category from current product
+      const categoryTags = currentTags.filter(tag =>
+        allowedCategories.includes(tag)
+      );
+
+      bestMatch = products.find(p => {
+        const tags = extractTags(p.tags);
+      
+        return (
+          p.status === "active" &&
+          p.id !== currentProduct.id &&
+          categoryTags.length > 0 &&
+          categoryTags.some(tag => tags.includes(tag))
+        );
+      });
+    }
+
+    // 🎯 FINAL SAFETY
+    if (!bestMatch) {
+      console.log("❌ No safe replacement found → skipping");
+      return null;
+    }
 
   return bestMatch;
 }
@@ -181,9 +202,6 @@ export default async function handler(req, res) {
     // ✅ STEP 2 — Update all subscriptions
     await processRecharge(product, replacement);
 
-    // ✅ STEP 3 — Update future queued orders
-    await updateQueuedOrders(product, replacement);
-
     return res.status(200).json({ success: true });
 
   } catch (err) {
@@ -209,7 +227,6 @@ async function sendEmailNotification(email, oldProduct, newProduct) {
         <p>It has been replaced with:</p>
 
         <p><strong>${newProduct}</strong></p>
-
         <p>
           You can manage your subscription here:
           <br/>
@@ -264,11 +281,12 @@ async function processRecharge(product, replacement) {
         console.log(`⏭️ Skipping non-active sub ${sub.id} (${sub.status})`);
         continue;
       }
+
     
       await swapSubscription(sub, replacement);
       // ✅ SEND EMAIL (only once per customer)
-      const customerEmail = sub.email;
-      console.log("📩 Subscription email:", sub.email);
+      const customerEmail = sub.email || sub.customer?.email;
+      console.log("📩 Subscription email:", customerEmail);
       if (
         customerEmail &&
         !notifiedCustomers.has(customerEmail)
@@ -276,18 +294,16 @@ async function processRecharge(product, replacement) {
         await sendEmailNotification(
           customerEmail,
           sub.product_title,
-          replacement.title
+          replacement.title,
         );
-
         notifiedCustomers.add(customerEmail);
       }
       await delay(200);
     }
     page++;
   }
+  await updateQueuedOrders(product, replacement);
 }
-
-// ================= UPDATE FUTURE ORDERS =================
 async function updateQueuedOrders(product, replacement) {
   try {
     let page = 1;
@@ -312,28 +328,28 @@ async function updateQueuedOrders(product, replacement) {
 
       for (const order of orders) {
         let updated = false;
-        const targetId = String(product.id);
-        const newLineItems = order.line_items.map(item => {
-            if (String(item.shopify_product_id) === targetId) {
-            updated = true;
 
-            console.log(`🔄 Updating order ${order.id}`);
+        const newLineItems = order.line_items.map(item => {
+          if (String(item.shopify_product_id) === String(product.id)) {
+            updated = true;
 
             return {
               ...item,
               shopify_product_id: replacement.product_id,
               shopify_variant_id: replacement.variant_id,
-              quantity: item.quantity, // 🔥 explicit safety
+              quantity: item.quantity,
             };
           }
           return item;
         });
 
         if (updated) {
+          console.log(`🔄 Updating order ${order.id}`);
+
           await axios.put(
             `https://api.rechargeapps.com/orders/${order.id}`,
             {
-              line_items: newLineItems,
+              line_items: newLineItems
             },
             {
               headers: {
@@ -342,8 +358,8 @@ async function updateQueuedOrders(product, replacement) {
             }
           );
 
-          await delay(200); // 🔥 add this
           console.log(`✅ Updated queued order ${order.id}`);
+          await delay(200);
         }
       }
 
@@ -351,7 +367,7 @@ async function updateQueuedOrders(product, replacement) {
     }
 
   } catch (err) {
-    console.error("❌ Failed updating queued orders:", err.response?.data || err.message);
+    console.error("❌ Failed updating queued orders:", err.message);
   }
 }
 

@@ -8,10 +8,14 @@ const RECHARGE_API_KEY = process.env.RECHARGE_API_KEY;
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_TOKEN;
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
+
 const delay = (ms) => new Promise(res => setTimeout(res, ms));
 const notifiedCustomers = new Set();
 
-// ================= EMAIL SETUP =================
+// ✅ Prevent duplicate processing
+const processedProducts = new Set();
+
+// ================= EMAIL =================
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
@@ -19,11 +23,6 @@ const transporter = nodemailer.createTransport({
     pass: process.env.EMAIL_PASS,
   },
 });
-
-// ================= CACHE =================
-let productCache = null;
-let lastFetchTime = 0;
-const CACHE_TTL = 5 * 60 * 1000; // 5 min
 
 // ================= CONFIG =================
 export const config = {
@@ -37,7 +36,7 @@ async function getRawBody(req) {
   return Buffer.concat(chunks);
 }
 
-// ================= VERIFY WEBHOOK =================
+// ================= VERIFY =================
 function verifyShopifyWebhook(rawBody, hmacHeader) {
   const hash = crypto
     .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
@@ -46,17 +45,16 @@ function verifyShopifyWebhook(rawBody, hmacHeader) {
 
   return hash === hmacHeader;
 }
-// ================= TAG HELPERS =================
+
+// ================= TAGS =================
 function extractTags(tagString = "") {
-  if (!tagString) return [];
-  
   return tagString
     .split(",")
     .map(t => t.trim().toLowerCase())
     .filter(Boolean);
 }
 
-// ================= SMART MATCH =================
+// ================= MATCH =================
 function findBestMatch(products, currentProduct) {
   const currentTags = extractTags(currentProduct.tags);
 
@@ -68,7 +66,6 @@ function findBestMatch(products, currentProduct) {
 
     const candidateTags = extractTags(p.tags);
 
-    // 🎯 Case 1: both have tags → score match
     if (currentTags.length && candidateTags.length) {
       const score = currentTags.filter(tag =>
         candidateTags.includes(tag)
@@ -80,58 +77,51 @@ function findBestMatch(products, currentProduct) {
       }
     }
 
-    // 🎯 Case 2: fallback (no tags anywhere)
     if (!currentTags.length && !candidateTags.length && !bestMatch) {
       bestMatch = p;
     }
   }
 
-      // 🎯 CATEGORY FALLBACK (SAFE)
-    if (!bestMatch) {
-      console.log("⚠️ No tag match → trying category fallback");
+  // ✅ CATEGORY SAFE FALLBACK
+  if (!bestMatch) {
+    console.log("⚠️ No tag match → category fallback");
 
-      // 👉 Define your categories here
-      const allowedCategories = ["soup", "meal", "salad"];
+    const allowedCategories = ["soup", "meal", "salad"];
 
-      // 👉 Find category from current product
-      const categoryTags = currentTags.filter(tag =>
-        allowedCategories.includes(tag)
+    const categoryTags = currentTags.filter(tag =>
+      allowedCategories.includes(tag)
+    );
+
+    bestMatch = products.find(p => {
+      const tags = extractTags(p.tags);
+      return (
+        p.status === "active" &&
+        p.id !== currentProduct.id &&
+        categoryTags.length > 0 &&
+        categoryTags.some(tag => tags.includes(tag))
       );
+    });
+  }
 
-      bestMatch = products.find(p => {
-        const tags = extractTags(p.tags);
-      
-        return (
-          p.status === "active" &&
-          p.id !== currentProduct.id &&
-          categoryTags.length > 0 &&
-          categoryTags.some(tag => tags.includes(tag))
-        );
-      });
-    }
-
-    // 🎯 FINAL SAFETY
-    if (!bestMatch) {
-      console.log("❌ No safe replacement found → skipping");
-      return null;
-    }
+  if (!bestMatch) {
+    console.log("❌ No safe replacement");
+    return null;
+  }
 
   return bestMatch;
 }
 
-// ================= PRODUCT FETCH (CACHED + PAGINATION) =================
+// ================= PRODUCTS =================
+let productCache = null;
+let lastFetchTime = 0;
+const CACHE_TTL = 5 * 60 * 1000;
+
 async function getProducts() {
-  console.log("👉 STORE:", SHOPIFY_STORE);
-  console.log("👉 TOKEN exists:", !!SHOPIFY_ACCESS_TOKEN);
-  console.log("👉 TOKEN preview:", SHOPIFY_ACCESS_TOKEN?.slice(0, 8));
   const now = Date.now();
-  
+
   if (productCache && now - lastFetchTime < CACHE_TTL) {
-    console.log("⚡ Using cached products");
     return productCache;
   }
-
-  console.log("🔄 Fetching products from Shopify");
 
   let allProducts = [];
   let url = `https://${SHOPIFY_STORE}/admin/api/${SHOPIFY_API_VERSION}/products.json?limit=250`;
@@ -139,23 +129,17 @@ async function getProducts() {
   while (url) {
     const res = await axios.get(url, {
       headers: {
-        "X-Shopify-Access-Token": String(SHOPIFY_ACCESS_TOKEN).trim(),
+        "X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
       },
-      timeout: 10000,
     });
 
     allProducts.push(...res.data.products);
 
     const link = res.headers.link;
-
-    if (link && link.includes('rel="next"')) {
-      url = link.split(";")[0].replace("<", "").replace(">", "");
-    } else {
-      url = null;
-    }
+    url = link?.includes('rel="next"')
+      ? link.split(";")[0].replace(/[<>]/g, "")
+      : null;
   }
-
-  console.log(`✅ Cached ${allProducts.length} products`);
 
   productCache = allProducts;
   lastFetchTime = now;
@@ -163,18 +147,21 @@ async function getProducts() {
   return allProducts;
 }
 
-// ================= MAIN HANDLER =================
+// ================= MAIN =================
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
   try {
+    // ✅ ONLY PRODUCT WEBHOOK
+    const topic = req.headers["x-shopify-topic"];
+
+    if (topic !== "products/update") {
+      console.log("⏭️ Ignored topic:", topic);
+      return res.status(200).end();
+    }
+
     const rawBody = await getRawBody(req);
     const hmac = req.headers["x-shopify-hmac-sha256"];
-
-    // 🔐 Verify webhook
-    if (!hmac) {
-      return res.status(401).send("Missing HMAC");
-    }
 
     if (!verifyShopifyWebhook(rawBody, hmac)) {
       return res.status(401).send("Unauthorized");
@@ -182,259 +169,177 @@ export default async function handler(req, res) {
 
     const product = JSON.parse(rawBody.toString());
 
-    // 🎯 Only process inactive products
-    const isInactive =
-      product.status === "archived" ||
-      product.status === "draft";
-
-    if (!isInactive) return res.status(200).end();
-
-    console.log("🚨 Inactive product:", product.title);
-
-    // ✅ STEP 1 — Find replacement ONCE
-    const replacement = await findReplacementProduct(product);
-
-    if (!replacement) {
-      console.log("❌ No replacement found → exiting safely");
+    // ✅ IGNORE INVALID PAYLOAD
+    if (!product?.id || !product?.title) {
+      console.log("⏭️ Invalid product payload");
       return res.status(200).end();
     }
 
-    // ✅ STEP 2 — Update all subscriptions
+    // ✅ IGNORE ACTIVE PRODUCTS (Recharge noise)
+    if (product.status !== "draft" && product.status !== "archived") {
+      console.log("⏭️ Ignoring active product:", product.title);
+      return res.status(200).end();
+    }
+
+    // ✅ PREVENT DUPLICATE RUNS
+    if (processedProducts.has(product.id)) {
+      console.log("⏭️ Already processed:", product.id);
+      return res.status(200).end();
+    }
+
+    processedProducts.add(product.id);
+
+    console.log("🚨 Processing inactive product:", product.title);
+
+    const replacement = await findReplacementProduct(product);
+
+    if (!replacement) {
+      return res.status(200).end();
+    }
+
     await processRecharge(product, replacement);
 
     return res.status(200).json({ success: true });
 
   } catch (err) {
-    console.error("❌ Webhook error:", err);
+    console.error("❌ Error:", err);
     return res.status(500).end();
   }
 }
 
-// ================= SEND EMAIL =================
+// ================= EMAIL =================
 async function sendEmailNotification(email, oldProduct, newProduct) {
   try {
     await transporter.sendMail({
       from: `"Farm to Home" <${process.env.EMAIL_USER}>`,
       to: email,
-      subject: "Update to Your Subscription",
+      subject: "Subscription Update",
       html: `
-        <p>Hello,</p>
-
-        <p>We’ve updated one of your subscription item:</p>
-
-        <p><strong>${oldProduct}</strong></p>
-
-        <p>It has been replaced with:</p>
-
-        <p><strong>${newProduct}</strong></p>
-        <p>
-          You can manage your subscription here:
-          <br/>
-          <a href="https://farmtohome.pt/account/login">
-            Manage your subscription
-          </a>
-        </p>
-
-        <p>Thanks 💚</p>
+        <p>We updated your item:</p>
+        <p><strong>${oldProduct}</strong> → <strong>${newProduct}</strong></p>
       `,
     });
-
-    console.log("📧 Email sent to", email);
   } catch (err) {
     console.error("❌ Email failed:", err.message);
   }
 }
 
-// ================= PROCESS RECHARGE =================
+// ================= RECHARGE =================
 async function processRecharge(product, replacement) {
   let page = 1;
-
-  if (!replacement) {
-    console.log("❌ No replacement found for any subscription");
-    return;
-  }
 
   while (true) {
     const res = await axios.get(
       "https://api.rechargeapps.com/subscriptions",
       {
-        headers: {
-          "X-Recharge-Access-Token": RECHARGE_API_KEY,
-        },
+        headers: { "X-Recharge-Access-Token": RECHARGE_API_KEY },
         params: {
           shopify_product_id: product.id,
-          status: "ACTIVE", // 🔥 filter directly
+          status: "ACTIVE",
           limit: 250,
           page,
-        }
+        },
       }
     );
 
     const subs = res.data.subscriptions || [];
     if (!subs.length) break;
+
     for (const sub of subs) {
-      if (String(sub.shopify_product_id) !== String(product.id)) {
-        continue;
-      }
-    
-      if (sub.status !== "ACTIVE") {
-        console.log(`⏭️ Skipping non-active sub ${sub.id} (${sub.status})`);
-        continue;
+      await swapSubscription(sub, replacement);
+
+      const email = sub.email || sub.customer?.email;
+
+      if (email && !notifiedCustomers.has(email)) {
+        await sendEmailNotification(
+          email,
+          sub.product_title,
+          replacement.title
+        );
+        notifiedCustomers.add(email);
       }
 
-    
-      await swapSubscription(sub, replacement);
-      // ✅ SEND EMAIL (only once per customer)
-      const customerEmail = sub.email || sub.customer?.email;
-      console.log("📩 Subscription email:", customerEmail);
-      if (
-        customerEmail &&
-        !notifiedCustomers.has(customerEmail)
-      ) {
-        await sendEmailNotification(
-          customerEmail,
-          sub.product_title,
-          replacement.title,
-        );
-        notifiedCustomers.add(customerEmail);
-      }
       await delay(200);
     }
+
     page++;
   }
+
   await updateQueuedOrders(product, replacement);
 }
+
+// ================= UPDATE ORDERS =================
 async function updateQueuedOrders(product, replacement) {
-  try {
-    let page = 1;
+  let page = 1;
 
-    while (true) {
-      const res = await axios.get(
-        "https://api.rechargeapps.com/orders",
-        {
-          headers: {
-            "X-Recharge-Access-Token": RECHARGE_API_KEY,
-          },
-          params: {
-            status: "QUEUED",
-            limit: 250,
-            page,
-          },
-        }
-      );
-
-      const orders = res.data.orders || [];
-      if (!orders.length) break;
-
-      for (const order of orders) {
-        let updated = false;
-
-        const newLineItems = order.line_items.map(item => {
-          if (String(item.shopify_product_id) === String(product.id)) {
-            updated = true;
-
-            return {
-              ...item,
-              shopify_product_id: replacement.product_id,
-              shopify_variant_id: replacement.variant_id,
-              quantity: item.quantity,
-            };
-          }
-          return item;
-        });
-
-        if (updated) {
-          console.log(`🔄 Updating order ${order.id}`);
-
-          await axios.put(
-            `https://api.rechargeapps.com/orders/${order.id}`,
-            {
-              line_items: newLineItems
-            },
-            {
-              headers: {
-                "X-Recharge-Access-Token": RECHARGE_API_KEY,
-              },
-            }
-          );
-
-          console.log(`✅ Updated queued order ${order.id}`);
-          await delay(200);
-        }
+  while (true) {
+    const res = await axios.get(
+      "https://api.rechargeapps.com/orders",
+      {
+        headers: { "X-Recharge-Access-Token": RECHARGE_API_KEY },
+        params: { status: "QUEUED", limit: 250, page },
       }
+    );
 
-      page++;
+    const orders = res.data.orders || [];
+    if (!orders.length) break;
+
+    for (const order of orders) {
+      let updated = false;
+
+      const newItems = order.line_items.map(item => {
+        if (String(item.shopify_product_id) === String(product.id)) {
+          updated = true;
+          return {
+            ...item,
+            shopify_product_id: replacement.product_id,
+            shopify_variant_id: replacement.variant_id,
+          };
+        }
+        return item;
+      });
+
+      if (updated) {
+        await axios.put(
+          `https://api.rechargeapps.com/orders/${order.id}`,
+          { line_items: newItems },
+          { headers: { "X-Recharge-Access-Token": RECHARGE_API_KEY } }
+        );
+
+        console.log("✅ Order updated:", order.id);
+        await delay(200);
+      }
     }
 
-  } catch (err) {
-    console.error("❌ Failed updating queued orders:", err.message);
+    page++;
   }
 }
 
 // ================= SWAP =================
 async function swapSubscription(sub, replacement) {
-  console.log("🔄 Swapping sub:", sub.id);
-
-  let attempts = 0;
-  const maxAttempts = 3;
-
-  while (attempts < maxAttempts) {
-    try {
-      await axios.put(
-        `https://api.rechargeapps.com/subscriptions/${sub.id}`,
-        {
-          shopify_product_id: replacement.product_id,
-          shopify_variant_id: replacement.variant_id,
-          quantity: sub.quantity, // 🔥 preserve quantity
-        },
-        {
-          headers: {
-            "X-Recharge-Access-Token": RECHARGE_API_KEY,
-          },
-        }
-      );
-      await delay(200); // 🔥 add this
-      console.log(`✅ Subscription swapped → ${replacement.title}`);
-      return;
-
-    } catch (err) {
-      const errorMsg = err.response?.data?.error || err.message;
-
-      if (errorMsg?.includes("already in progress")) {
-        console.log(`⏳ Retry ${attempts + 1} for sub ${sub.id}`);
-        await delay(300);
-        attempts++;
-      } else {
-        console.error("❌ Swap failed:", err.response?.data || err.message);
-        return;
-      }
+  await axios.put(
+    `https://api.rechargeapps.com/subscriptions/${sub.id}`,
+    {
+      shopify_product_id: replacement.product_id,
+      shopify_variant_id: replacement.variant_id,
+      quantity: sub.quantity,
+    },
+    {
+      headers: { "X-Recharge-Access-Token": RECHARGE_API_KEY },
     }
-  }
-
-  console.error(`❌ Failed after retries for sub ${sub.id}`);
+  );
 }
-// ================= FIND REPLACEMENT =================
+
+// ================= FIND =================
 async function findReplacementProduct(product) {
-  try {
-    const products = await getProducts();
+  const products = await getProducts();
+  const match = findBestMatch(products, product);
 
-    const match = findBestMatch(products, product);
-    if (!match) return null;
+  if (!match?.variants?.length) return null;
 
-    // 🔥 ADD THIS HERE
-    if (!match.variants?.length) {
-      console.log("⚠️ No variants found → skipping");
-      return null;
-    }
-
-    return {
-      product_id: match.id,
-      variant_id: match.variants?.[0]?.id || null,
-      title: match.title,
-    };
-
-  } catch (err) {
-    console.error("❌ Matching error:", err.message);
-    return null;
-  }
+  return {
+    product_id: match.id,
+    variant_id: match.variants[0].id,
+    title: match.title,
+  };
 }

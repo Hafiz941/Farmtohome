@@ -1,15 +1,22 @@
 export default async function handler(req, res) {
   try {
+    console.log("🔥 WEBHOOK HIT:", req.headers["x-shopify-topic"]);
+
     const order = req.body;
 
     console.log("🧾 Shopify order received:", order.id);
 
     // =========================
-    // ✅ CHECK RECHARGE ORDER
+    // ✅ DETECT SUBSCRIPTION ORDER (IMPROVED)
     // =========================
     const isRecharge =
       order.source_name === "subscription_contract" ||
-      order.tags?.toLowerCase().includes("subscription");
+      order.tags?.toLowerCase().includes("subscription") ||
+      order.line_items?.some(item =>
+        item.properties?.some(p =>
+          p.name?.toLowerCase().includes("subscription")
+        )
+      );
 
     if (!isRecharge) {
       console.log("⏭️ Not a subscription order");
@@ -17,7 +24,7 @@ export default async function handler(req, res) {
     }
 
     // =========================
-    // ✅ GET DELIVERY STRING (SHOPIFY ONLY)
+    // ✅ GET DELIVERY STRING
     // =========================
     let deliveryString = null;
 
@@ -28,7 +35,7 @@ export default async function handler(req, res) {
       )?.value;
     }
 
-    // 2️⃣ 🔥 Fallback → line item properties (Recharge safe)
+    // 2️⃣ Fallback → line items (Recharge safe)
     if (!deliveryString) {
       for (const item of order.line_items || []) {
         for (const prop of item.properties || []) {
@@ -49,7 +56,6 @@ export default async function handler(req, res) {
 
     if (deliveryString) {
       const extracted = extractDayAndTime(deliveryString);
-
       if (extracted) {
         deliveryDay = extracted.day;
         deliveryTime = extracted.time;
@@ -59,7 +65,7 @@ export default async function handler(req, res) {
     console.log("📊 Extracted:", { deliveryDay, deliveryTime });
 
     // =========================
-    // ✅ CALCULATE DELIVERY
+    // ✅ CALCULATE NEXT DELIVERY
     // =========================
     const finalDelivery = calculateDeliveryFromOrder(
       order,

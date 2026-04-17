@@ -1,41 +1,62 @@
 export default async function handler(req, res) {
   try {
-    if (req.method !== "POST") return res.status(405).end();
+    if (req.method !== "POST") {
+      return res.status(405).end();
+    }
 
+    // =========================
+    // ✅ TOPIC CHECK
+    // =========================
     const topic = req.headers["x-shopify-topic"];
+    console.log("📢 Webhook topic:", topic);
 
-    // ✅ ONLY orders/create
-    if (topic !== "orders/create") {
+    const allowedTopics = ["orders/create", "orders/paid"];
+
+    if (!allowedTopics.includes(topic)) {
       console.log("⏭️ Ignored topic:", topic);
       return res.status(200).end();
     }
 
-    console.log("🔥 WEBHOOK HIT:", topic);
-
+    // =========================
+    // ✅ GET ORDER
+    // =========================
     const order = req.body;
+
+    if (!order?.id) {
+      console.log("⏭️ Invalid order payload");
+      return res.status(200).end();
+    }
 
     console.log("🧾 Shopify order received:", order.id);
 
-    // ✅ STRICT Recharge only
-    const isRecharge =
-      order.source_name === "subscription_contract";
-
-    if (!isRecharge) {
-      console.log("⏭️ Not a subscription order");
-      return res.status(200).send("Not a subscription order");
-    }
-
-    // ✅ LOOP PREVENTION
+    // =========================
+    // ✅ PREVENT DUPLICATES
+    // =========================
     const alreadyProcessed = order.note_attributes?.some(
       attr => attr.name === "Processed-By"
     );
 
     if (alreadyProcessed) {
-      console.log("⏭️ Already processed order");
+      console.log("⏭️ Already processed order:", order.id);
       return res.status(200).end();
     }
 
-    // ================= DELIVERY =================
+    // =========================
+    // ✅ CHECK RECHARGE ORDER
+    // =========================
+    const isRecharge =
+      order.source_name === "subscription_contract" ||
+      order.tags?.toLowerCase().includes("subscription") ||
+      order.line_items?.some(item => item.selling_plan_allocation);
+
+    if (!isRecharge) {
+      console.log("⏭️ Not a subscription order");
+      return res.status(200).end();
+    }
+
+    // =========================
+    // ✅ GET DELIVERY STRING
+    // =========================
     let deliveryString = null;
 
     if (order.note_attributes?.length) {
@@ -54,23 +75,46 @@ export default async function handler(req, res) {
       }
     }
 
-    let deliveryDay = "wednesday";
-    let deliveryTime = "19:00-21:00";
-
-    if (deliveryString) {
-      const extracted = extractDayAndTime(deliveryString);
-      if (extracted) {
-        deliveryDay = extracted.day;
-        deliveryTime = extracted.time;
-      }
+    if (!deliveryString) {
+      console.log("❌ No delivery string found");
+      return res.status(200).end();
     }
 
-    const finalDelivery = calculateDeliveryFromOrder(
-      order,
-      deliveryDay,
-      deliveryTime
+    console.log("📦 Delivery string:", deliveryString);
+
+    // =========================
+    // ✅ EXTRACT DELIVERY INFO
+    // =========================
+    const extracted = extractDeliveryInfo(deliveryString);
+
+    if (!extracted) {
+      console.log("❌ Failed to parse delivery string");
+      return res.status(200).end();
+    }
+
+    console.log("📊 Extracted:", extracted);
+
+    // =========================
+    // ✅ CALCULATE NEXT DELIVERY DATE (KEY FIX)
+    // =========================
+    const nextDate = getNextWeekday(
+      new Date(order.created_at),
+      extracted.day.toLowerCase()
     );
 
+    const formattedDate = nextDate.toLocaleDateString("en-GB", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric"
+    });
+
+    const finalDelivery = `${extracted.day} (${extracted.time}) - ${formattedDate}`;
+
+    console.log("📅 Final delivery:", finalDelivery);
+
+    // =========================
+    // ✅ UPDATE ATTRIBUTES
+    // =========================
     const existingAttributes = order.note_attributes || [];
 
     const updatedAttributes = [
@@ -87,7 +131,10 @@ export default async function handler(req, res) {
       }
     ];
 
-    await fetch(
+    // =========================
+    // ✅ UPDATE SHOPIFY ORDER
+    // =========================
+    const response = await fetch(
       `https://${process.env.SHOPIFY_STORE}/admin/api/2024-01/orders/${order.id}.json`,
       {
         method: "PUT",
@@ -104,7 +151,8 @@ export default async function handler(req, res) {
       }
     );
 
-    console.log("✅ Shopify updated:", order.id);
+    const data = await response.json();
+    console.log("✅ Shopify updated:", data);
 
     return res.status(200).send("Updated");
 
@@ -114,20 +162,23 @@ export default async function handler(req, res) {
   }
 }
 
-// ================= HELPERS =================
-function extractDayAndTime(deliveryString) {
+// =========================
+// ✅ EXTRACT DELIVERY INFO
+// =========================
+function extractDeliveryInfo(deliveryString) {
   try {
-    const [dayTime] = deliveryString.split(" - ");
+    const [dayTime, datePart] = deliveryString.split(" - ");
 
     const dayMatch = dayTime.match(/^(.*?) \(/);
     const timeMatch = dayTime.match(/\((.*?)\)/);
 
-    const day = dayMatch?.[1]?.toLowerCase();
-    const time = timeMatch?.[1];
+    const day = dayMatch?.[1]?.trim();
+    const time = timeMatch?.[1]?.trim();
+    const date = datePart?.trim();
 
-    if (!day || !time) return null;
+    if (!day || !time || !date) return null;
 
-    return { day, time };
+    return { day, time, date };
 
   } catch (err) {
     console.error("❌ Extraction failed:", err);
@@ -135,38 +186,24 @@ function extractDayAndTime(deliveryString) {
   }
 }
 
-function calculateDeliveryFromOrder(order, deliveryDay, deliveryTime) {
-  const createdAt = new Date(order.created_at);
-
+// =========================
+// ✅ GET NEXT WEEKDAY
+// =========================
+function getNextWeekday(date, targetDayName) {
   const daysMap = {
+    sunday: 0,
+    monday: 1,
+    tuesday: 2,
     wednesday: 3,
     thursday: 4,
-    friday: 5
+    friday: 5,
+    saturday: 6
   };
 
-  const dayNames = {
-    wednesday: "Wednesday",
-    thursday: "Thursday",
-    friday: "Friday"
-  };
-
-  const targetDay = daysMap[deliveryDay] || 3;
-
-  const deliveryDate = getNextWeekday(createdAt, targetDay);
-
-  const formattedDate = deliveryDate.toLocaleDateString("en-GB", {
-    day: "2-digit",
-    month: "long"
-  });
-
-  return `${dayNames[deliveryDay]} (${deliveryTime}) - ${formattedDate}`;
-}
-
-function getNextWeekday(date, targetDay) {
+  const targetDay = daysMap[targetDayName];
   const d = new Date(date);
-  const current = d.getDay();
 
-  let diff = (targetDay - current + 7) % 7;
+  let diff = (targetDay - d.getDay() + 7) % 7;
   if (diff === 0) diff = 7;
 
   d.setDate(d.getDate() + diff);

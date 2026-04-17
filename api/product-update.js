@@ -9,10 +9,12 @@ const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_TOKEN;
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
 
+// ================= HELPERS =================
 const delay = (ms) => new Promise(res => setTimeout(res, ms));
 const notifiedCustomers = new Set();
 
-// ✅ Prevent duplicate processing
+// ⚠️ In-memory cache (NOTE: resets on Vercel cold start)
+const productStatusCache = new Map();
 const processedProducts = new Set();
 
 // ================= EMAIL =================
@@ -66,52 +68,20 @@ function findBestMatch(products, currentProduct) {
 
     const candidateTags = extractTags(p.tags);
 
-    if (currentTags.length && candidateTags.length) {
-      const score = currentTags.filter(tag =>
-        candidateTags.includes(tag)
-      ).length;
+    const score = currentTags.filter(tag =>
+      candidateTags.includes(tag)
+    ).length;
 
-      if (score > bestScore) {
-        bestScore = score;
-        bestMatch = p;
-      }
-    }
-
-    if (!currentTags.length && !candidateTags.length && !bestMatch) {
+    if (score > bestScore) {
+      bestScore = score;
       bestMatch = p;
     }
-  }
-
-  // ✅ CATEGORY SAFE FALLBACK
-  if (!bestMatch) {
-    console.log("⚠️ No tag match → category fallback");
-
-    const allowedCategories = ["soup", "meal", "salad"];
-
-    const categoryTags = currentTags.filter(tag =>
-      allowedCategories.includes(tag)
-    );
-
-    bestMatch = products.find(p => {
-      const tags = extractTags(p.tags);
-      return (
-        p.status === "active" &&
-        p.id !== currentProduct.id &&
-        categoryTags.length > 0 &&
-        categoryTags.some(tag => tags.includes(tag))
-      );
-    });
-  }
-
-  if (!bestMatch) {
-    console.log("❌ No safe replacement");
-    return null;
   }
 
   return bestMatch;
 }
 
-// ================= PRODUCTS =================
+// ================= PRODUCTS CACHE =================
 let productCache = null;
 let lastFetchTime = 0;
 const CACHE_TTL = 5 * 60 * 1000;
@@ -152,11 +122,9 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
   try {
-    // ✅ ONLY PRODUCT WEBHOOK
     const topic = req.headers["x-shopify-topic"];
 
     if (topic !== "products/update") {
-      console.log("⏭️ Ignored topic:", topic);
       return res.status(200).end();
     }
 
@@ -169,33 +137,37 @@ export default async function handler(req, res) {
 
     const product = JSON.parse(rawBody.toString());
 
-    // ✅ IGNORE INVALID PAYLOAD
-    if (!product?.id || !product?.title) {
-      console.log("⏭️ Invalid product payload");
+    if (!product?.id) return res.status(200).end();
+
+    // ================= STATUS TRANSITION CHECK =================
+    const previousStatus = productStatusCache.get(product.id);
+    const currentStatus = product.status;
+
+    productStatusCache.set(product.id, currentStatus);
+
+    if (!previousStatus) {
+      console.log("⏭️ First time, skipping:", product.title);
       return res.status(200).end();
     }
 
-    // ✅ IGNORE ACTIVE PRODUCTS (Recharge noise)
-    if (product.status !== "draft" && product.status !== "archived") {
-      console.log("⏭️ Ignoring active product:", product.title);
+    const becameInactive =
+      previousStatus === "active" &&
+      (currentStatus === "draft" || currentStatus === "archived");
+
+    if (!becameInactive) {
       return res.status(200).end();
     }
 
-    // ✅ PREVENT DUPLICATE RUNS
+    // ================= DUPLICATE PROTECTION =================
     if (processedProducts.has(product.id)) {
-      console.log("⏭️ Already processed:", product.id);
       return res.status(200).end();
     }
-
     processedProducts.add(product.id);
 
-    console.log("🚨 Processing inactive product:", product.title);
+    console.log("🚨 Product became inactive:", product.title);
 
     const replacement = await findReplacementProduct(product);
-
-    if (!replacement) {
-      return res.status(200).end();
-    }
+    if (!replacement) return res.status(200).end();
 
     await processRecharge(product, replacement);
 
@@ -207,21 +179,28 @@ export default async function handler(req, res) {
   }
 }
 
+// ================= REPLACEMENT =================
+async function findReplacementProduct(product) {
+  const products = await getProducts();
+  const match = findBestMatch(products, product);
+
+  if (!match?.variants?.length) return null;
+
+  return {
+    product_id: match.id,
+    variant_id: match.variants[0].id,
+    title: match.title,
+  };
+}
+
 // ================= EMAIL =================
 async function sendEmailNotification(email, oldProduct, newProduct) {
-  try {
-    await transporter.sendMail({
-      from: `"Farm to Home" <${process.env.EMAIL_USER}>`,
-      to: email,
-      subject: "Subscription Update",
-      html: `
-        <p>We updated your item:</p>
-        <p><strong>${oldProduct}</strong> → <strong>${newProduct}</strong></p>
-      `,
-    });
-  } catch (err) {
-    console.error("❌ Email failed:", err.message);
-  }
+  await transporter.sendMail({
+    from: `"Farm to Home" <${process.env.EMAIL_USER}>`,
+    to: email,
+    subject: "Subscription Update",
+    html: `<p>${oldProduct} → ${newProduct}</p>`,
+  });
 }
 
 // ================= RECHARGE =================
@@ -246,7 +225,16 @@ async function processRecharge(product, replacement) {
     if (!subs.length) break;
 
     for (const sub of subs) {
-      await swapSubscription(sub, replacement);
+      await axios.put(
+        `https://api.rechargeapps.com/subscriptions/${sub.id}`,
+        {
+          shopify_product_id: replacement.product_id,
+          shopify_variant_id: replacement.variant_id,
+        },
+        {
+          headers: { "X-Recharge-Access-Token": RECHARGE_API_KEY },
+        }
+      );
 
       const email = sub.email || sub.customer?.email;
 
@@ -264,82 +252,4 @@ async function processRecharge(product, replacement) {
 
     page++;
   }
-
-  await updateQueuedOrders(product, replacement);
-}
-
-// ================= UPDATE ORDERS =================
-async function updateQueuedOrders(product, replacement) {
-  let page = 1;
-
-  while (true) {
-    const res = await axios.get(
-      "https://api.rechargeapps.com/orders",
-      {
-        headers: { "X-Recharge-Access-Token": RECHARGE_API_KEY },
-        params: { status: "QUEUED", limit: 250, page },
-      }
-    );
-
-    const orders = res.data.orders || [];
-    if (!orders.length) break;
-
-    for (const order of orders) {
-      let updated = false;
-
-      const newItems = order.line_items.map(item => {
-        if (String(item.shopify_product_id) === String(product.id)) {
-          updated = true;
-          return {
-            ...item,
-            shopify_product_id: replacement.product_id,
-            shopify_variant_id: replacement.variant_id,
-          };
-        }
-        return item;
-      });
-
-      if (updated) {
-        await axios.put(
-          `https://api.rechargeapps.com/orders/${order.id}`,
-          { line_items: newItems },
-          { headers: { "X-Recharge-Access-Token": RECHARGE_API_KEY } }
-        );
-
-        console.log("✅ Order updated:", order.id);
-        await delay(200);
-      }
-    }
-
-    page++;
-  }
-}
-
-// ================= SWAP =================
-async function swapSubscription(sub, replacement) {
-  await axios.put(
-    `https://api.rechargeapps.com/subscriptions/${sub.id}`,
-    {
-      shopify_product_id: replacement.product_id,
-      shopify_variant_id: replacement.variant_id,
-      quantity: sub.quantity,
-    },
-    {
-      headers: { "X-Recharge-Access-Token": RECHARGE_API_KEY },
-    }
-  );
-}
-
-// ================= FIND =================
-async function findReplacementProduct(product) {
-  const products = await getProducts();
-  const match = findBestMatch(products, product);
-
-  if (!match?.variants?.length) return null;
-
-  return {
-    product_id: match.id,
-    variant_id: match.variants[0].id,
-    title: match.title,
-  };
 }

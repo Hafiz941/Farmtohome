@@ -1,41 +1,49 @@
 export default async function handler(req, res) {
   try {
-    console.log("🔥 WEBHOOK HIT:", req.headers["x-shopify-topic"]);
+    if (req.method !== "POST") return res.status(405).end();
+
+    const topic = req.headers["x-shopify-topic"];
+
+    // ✅ ONLY orders/create
+    if (topic !== "orders/create") {
+      console.log("⏭️ Ignored topic:", topic);
+      return res.status(200).end();
+    }
+
+    console.log("🔥 WEBHOOK HIT:", topic);
 
     const order = req.body;
 
     console.log("🧾 Shopify order received:", order.id);
 
-    // =========================
-    // ✅ DETECT SUBSCRIPTION ORDER (IMPROVED)
-    // =========================
+    // ✅ STRICT Recharge only
     const isRecharge =
-      order.source_name === "subscription_contract" ||
-      order.tags?.toLowerCase().includes("subscription") ||
-      order.line_items?.some(item =>
-        item.properties?.some(p =>
-          p.name?.toLowerCase().includes("subscription")
-        )
-      );
+      order.source_name === "subscription_contract";
 
     if (!isRecharge) {
       console.log("⏭️ Not a subscription order");
       return res.status(200).send("Not a subscription order");
     }
 
-    // =========================
-    // ✅ GET DELIVERY STRING
-    // =========================
+    // ✅ LOOP PREVENTION
+    const alreadyProcessed = order.note_attributes?.some(
+      attr => attr.name === "Processed-By"
+    );
+
+    if (alreadyProcessed) {
+      console.log("⏭️ Already processed order");
+      return res.status(200).end();
+    }
+
+    // ================= DELIVERY =================
     let deliveryString = null;
 
-    // 1️⃣ From note_attributes
     if (order.note_attributes?.length) {
       deliveryString = order.note_attributes.find(
         a => a.name?.toLowerCase() === "delivery date"
       )?.value;
     }
 
-    // 2️⃣ Fallback → line items (Recharge safe)
     if (!deliveryString) {
       for (const item of order.line_items || []) {
         for (const prop of item.properties || []) {
@@ -46,11 +54,6 @@ export default async function handler(req, res) {
       }
     }
 
-    console.log("📦 Delivery string:", deliveryString);
-
-    // =========================
-    // ✅ EXTRACT DAY + TIME
-    // =========================
     let deliveryDay = "wednesday";
     let deliveryTime = "19:00-21:00";
 
@@ -62,22 +65,12 @@ export default async function handler(req, res) {
       }
     }
 
-    console.log("📊 Extracted:", { deliveryDay, deliveryTime });
-
-    // =========================
-    // ✅ CALCULATE NEXT DELIVERY
-    // =========================
     const finalDelivery = calculateDeliveryFromOrder(
       order,
       deliveryDay,
       deliveryTime
     );
 
-    console.log("📅 Final delivery:", finalDelivery);
-
-    // =========================
-    // ✅ PRESERVE EXISTING ATTRIBUTES
-    // =========================
     const existingAttributes = order.note_attributes || [];
 
     const updatedAttributes = [
@@ -87,13 +80,14 @@ export default async function handler(req, res) {
       {
         name: "Delivery date",
         value: finalDelivery
+      },
+      {
+        name: "Processed-By",
+        value: "middleware"
       }
     ];
 
-    // =========================
-    // ✅ UPDATE SHOPIFY ORDER
-    // =========================
-    const response = await fetch(
+    await fetch(
       `https://${process.env.SHOPIFY_STORE}/admin/api/2024-01/orders/${order.id}.json`,
       {
         method: "PUT",
@@ -110,8 +104,7 @@ export default async function handler(req, res) {
       }
     );
 
-    const data = await response.json();
-    console.log("✅ Shopify updated:", data);
+    console.log("✅ Shopify updated:", order.id);
 
     return res.status(200).send("Updated");
 
@@ -121,17 +114,9 @@ export default async function handler(req, res) {
   }
 }
 
-//
-// =========================
-// ✅ EXTRACT DAY + TIME
-// =========================
-//
-
+// ================= HELPERS =================
 function extractDayAndTime(deliveryString) {
   try {
-    // Example:
-    // "Friday (19:00-21:00) - 09 April"
-
     const [dayTime] = deliveryString.split(" - ");
 
     const dayMatch = dayTime.match(/^(.*?) \(/);
@@ -149,12 +134,6 @@ function extractDayAndTime(deliveryString) {
     return null;
   }
 }
-
-//
-// =========================
-// ✅ CALCULATE DELIVERY
-// =========================
-//
 
 function calculateDeliveryFromOrder(order, deliveryDay, deliveryTime) {
   const createdAt = new Date(order.created_at);
@@ -182,12 +161,6 @@ function calculateDeliveryFromOrder(order, deliveryDay, deliveryTime) {
 
   return `${dayNames[deliveryDay]} (${deliveryTime}) - ${formattedDate}`;
 }
-
-//
-// =========================
-// ✅ HELPER
-// =========================
-//
 
 function getNextWeekday(date, targetDay) {
   const d = new Date(date);

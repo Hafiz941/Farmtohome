@@ -9,7 +9,6 @@ const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_TOKEN;
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
 const delay = (ms) => new Promise(res => setTimeout(res, ms));
-const notifiedCustomers = new Set();
 
 // ================= EMAIL SETUP =================
 const transporter = nodemailer.createTransport({
@@ -205,7 +204,7 @@ async function processRemovalOnly(product) {
       console.log(`⚠️ Handling removal for sub ${sub.id}`);
 
       // ================= EMAIL =================
-      if (sub.email && !notifiedCustomers.has(sub.email)) {
+      if (sub.email) {
         const category =
           getPrimaryCategory(extractTags(product.tags)) || "this dish category";
 
@@ -214,8 +213,6 @@ async function processRemovalOnly(product) {
           sub.product_title,
           category
         );
-
-        notifiedCustomers.add(sub.email);
       }
 
       // ================= OPTIONAL: PREVENT REAPPEAR =================
@@ -427,17 +424,12 @@ async function processRecharge(product, replacement) {
       // ✅ SEND EMAIL (only once per customer)
       const customerEmail = sub.email;
       console.log("📩 Subscription email:", sub.email);
-      if (
-        customerEmail &&
-        !notifiedCustomers.has(customerEmail)
-      ) {
+      if (customerEmail) {
         await sendEmailNotification(
           customerEmail,
           sub.product_title,
           replacement.title
         );
-
-        notifiedCustomers.add(customerEmail);
       }
       await delay(200);
     }

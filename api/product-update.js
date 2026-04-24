@@ -183,11 +183,10 @@ async function processRemovalOnly(product) {
           "X-Recharge-Access-Token": RECHARGE_API_KEY,
         },
         params: {
-          shopify_product_id: product.id,
           status: "ACTIVE",
           limit: 250,
           page,
-        },
+        }
       }
     );
 
@@ -196,21 +195,29 @@ async function processRemovalOnly(product) {
 
     for (const sub of subs) {
       console.log(`⚠️ NOT deleting subscription ${sub.id}`);
-
-      // ✅ ONLY SEND EMAIL
+    
+      const isSameProduct =
+        String(sub.shopify_product_id) === String(product.id) ||
+        sub.product_title?.toLowerCase() === product.title?.toLowerCase();
+    
+      if (!isSameProduct) {
+        continue;
+      }
+    
+      // ✅ SEND EMAIL
       if (sub.email && !notifiedCustomers.has(sub.email)) {
         const category =
           getPrimaryCategory(extractTags(product.tags)) || "this category";
-
+    
         await sendRemovalEmail(
           sub.email,
           sub.product_title,
           category
         );
-
+    
         notifiedCustomers.add(sub.email);
       }
-
+    
       await delay(200);
     }
 
@@ -346,8 +353,7 @@ async function processRecharge(product, replacement) {
           "X-Recharge-Access-Token": RECHARGE_API_KEY,
         },
         params: {
-          shopify_product_id: product.id,
-          status: "ACTIVE", // 🔥 filter directly
+          status: "ACTIVE",
           limit: 250,
           page,
         }

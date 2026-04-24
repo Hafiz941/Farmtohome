@@ -275,35 +275,52 @@ async function removeFromQueuedOrders(product) {
         continue;
       }
 
-      for (const item of order.line_items) {
+      let updated = false;
 
+      const newLineItems = order.line_items.filter(item => {
         const isSameProduct =
           String(item.shopify_product_id) === String(product.id) ||
           item.title?.toLowerCase() === product.title?.toLowerCase();
 
-        if (!isSameProduct) continue;
-
-        console.log(`🗑️ Deleting item ${item.id} from order ${order.id}`);
-
-        try {
-          await axios.delete(
-            `https://api.rechargeapps.com/orders/${order.id}/line_items/${item.id}`,
-            {
-              headers: {
-                "X-Recharge-Access-Token": RECHARGE_API_KEY,
-              },
-            }
-          );
-
-          console.log(`✅ Removed item from order ${order.id}`);
-          await delay(200);
-
-        } catch (err) {
-          console.error(
-            "❌ Failed to delete item:",
-            err.response?.data || err.message
-          );
+        if (isSameProduct) {
+          console.log(`🗑️ Removing item from order ${order.id}`);
+          updated = true;
+          return false;
         }
+
+        return true;
+      });
+
+      if (!updated) continue;
+
+      try {
+        // ✅ IMPORTANT: send FULL updated list
+        await axios.put(
+          `https://api.rechargeapps.com/orders/${order.id}`,
+          {
+            line_items: newLineItems.map(item => ({
+              id: item.id, // keep id
+              shopify_product_id: item.shopify_product_id,
+              shopify_variant_id: item.shopify_variant_id,
+              quantity: item.quantity,
+            })),
+          },
+          {
+            headers: {
+              "X-Recharge-Access-Token": RECHARGE_API_KEY,
+            },
+          }
+        );
+
+        console.log(`✅ Order ${order.id} updated (item removed)`);
+
+        await delay(200);
+
+      } catch (err) {
+        console.error(
+          "❌ Failed updating order:",
+          err.response?.data || err.message
+        );
       }
     }
 

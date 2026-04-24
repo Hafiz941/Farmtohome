@@ -526,40 +526,49 @@ async function findReplacementProduct(product) {
       return null;
     }
 
-    // ✅ STEP 2: best tag match
-    let bestMatch = null;
-    let bestScore = -1;
+    // ✅ STEP 2: best tag match (STRICT)
 
-    for (const p of sameCategoryProducts) {
-      const tags = extractTags(p.tags);
+      let bestMatch = null;
+      let bestScore = -1;
 
-      const filteredCurrentTags = currentTags.filter(t => t !== currentCategory);
-      const filteredTags = tags.filter(t => t !== currentCategory);
+      for (const p of sameCategoryProducts) {
+        const tags = extractTags(p.tags);
 
-      const score = filteredCurrentTags.filter(tag =>
-        filteredTags.includes(tag)
-      ).length;
+        // remove primary category from comparison
+        const filteredCurrentTags = currentTags.filter(t => t !== currentCategory);
+        const filteredTags = tags.filter(t => t !== currentCategory);
 
-      if (score > bestScore) {
-        bestScore = score;
-        bestMatch = p;
+        const score = filteredCurrentTags.filter(tag =>
+          filteredTags.includes(tag)
+        ).length;
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestMatch = p;
+        }
+
+        // optional optimization
+        if (bestScore === filteredCurrentTags.length) {
+          break;
+        }
       }
-      
-      // 🔥 Early exit if perfect match found
-      if (bestScore === filteredCurrentTags.length) {
-        break;
+
+      // ❌ CRITICAL: NO secondary match → NO swap
+      if (bestScore <= 0) {
+        console.log("❌ No secondary tag match → removal flow");
+        return null;
       }
-    }
 
-    if (!bestMatch || !bestMatch.variants?.length) {
-      return null;
-    }
+      // final safety
+      if (!bestMatch || !bestMatch.variants?.length) {
+        return null;
+      }
 
-    return {
-      product_id: bestMatch.id,
-      variant_id: bestMatch.variants[0].id,
-      title: bestMatch.title,
-    };
+      return {
+        product_id: bestMatch.id,
+        variant_id: bestMatch.variants[0].id,
+        title: bestMatch.title,
+      };
 
   } catch (err) {
     console.error("❌ Matching error:", err.message);

@@ -333,24 +333,28 @@ async function sendEmailNotification(email, oldProduct, newProduct) {
       subject: "Update to Your Subscription",
       html: `
         <p>Hello,</p>
-
-        <p>We’ve updated one of your subscription item:</p>
-
-        <p><strong>${oldProduct}</strong></p>
-
-        <p>It has been replaced with:</p>
-
+    
+        <p>We wanted to let you know that <strong>${oldProduct}</strong> is no longer available in our store.</p>
+    
+        <p>To ensure your subscription continues without interruption, we have replaced it with the closest available alternative:</p>
+    
         <p><strong>${newProduct}</strong></p>
-
+    
+        <p><strong>What you can do next:</strong></p>
+        <ul>
+          <li>You can log in to your account and change or swap this product according to your preference</li>
+          <li>Or simply reply to this email, and we’ll update your order for you</li>
+        </ul>
+    
         <p>
-          You can manage your subscription here:
-          <br/>
-          <a href="https://farmtohome.pt/account/login">
-            Manage your subscription
+          👉 <a href="https://farmtohome.pt/account/login">
+          Manage your subscription
           </a>
         </p>
-
-        <p>Thanks 💚</p>
+    
+        <p>If you need any assistance, feel free to reach out — we’re here to help 💚</p>
+    
+        <p>Thank you,<br/>Farm to Home Team</p>
       `,
     });
 
@@ -367,20 +371,26 @@ async function sendRemovalEmail(email, dishName, category) {
     subject: "Update to Your Subscription",
     html: `
       <p>Hello,</p>
-
-      <p>We wanted to inform you that <strong>${dishName}</strong> has been removed from your upcoming subscription orders as it is no longer available in its category (${category}).</p>
-
-      <p>At the moment, we do not have any dish available in this category.</p>
-
+  
+      <p>We wanted to let you know that <strong>${dishName}</strong> is no longer available in its category (${category}).</p>
+  
+      <p>At the moment, we do not have a suitable alternative available in this category.</p>
+  
+      <p><strong>What you can do next:</strong></p>
+      <ul>
+        <li>You can log in to your account and choose another dish according to your preference</li>
+        <li>Or simply reply to this email, and we’ll be happy to update your upcoming order for you</li>
+      </ul>
+  
       <p>
-        If you would like to add another dish, you can simply log in to your account and update your subscription:
-        <br/>
-        <a href="https://farmtohome.pt/account/login">
-          Manage your subscription
+        👉 <a href="https://farmtohome.pt/account/login">
+        Manage your subscription
         </a>
       </p>
-
-      <p>Thank you 💚</p>
+  
+      <p>If you need any assistance, feel free to reach out — we’re here to help 💚</p>
+  
+      <p>Thank you,<br/>Farm to Home Team</p>
     `,
   });
 }

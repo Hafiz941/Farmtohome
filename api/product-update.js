@@ -56,46 +56,22 @@ function extractTags(tagString = "") {
     .filter(Boolean);
 }
 
-// ================= SMART MATCH =================
-function findBestMatch(products, currentProduct) {
-  const currentTags = extractTags(currentProduct.tags);
+const CATEGORY_PRIORITY = [
+  "meat",
+  "fish",
+  "vegetariano e vegan",
+  "functional soups",
+  "addons",
+  "meat & fish"
+];
 
-  let bestMatch = null;
-  let bestScore = 0;
-
-  for (const p of products) {
-    if (p.status !== "active" || p.id === currentProduct.id) continue;
-
-    const candidateTags = extractTags(p.tags);
-
-    // 🎯 Case 1: both have tags → score match
-    if (currentTags.length && candidateTags.length) {
-      const score = currentTags.filter(tag =>
-        candidateTags.includes(tag)
-      ).length;
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestMatch = p;
-      }
-    }
-
-    // 🎯 Case 2: fallback (no tags anywhere)
-    if (!currentTags.length && !candidateTags.length && !bestMatch) {
-      bestMatch = p;
+function getPrimaryCategory(tags = []) {
+  for (const category of CATEGORY_PRIORITY) {
+    if (tags.includes(category)) {
+      return category;
     }
   }
-
-  // 🎯 FINAL FALLBACK (VERY IMPORTANT)
-  if (!bestMatch) {
-    console.log("⚠️ No tag match → using fallback product");
-
-    bestMatch = products.find(p =>
-      p.status === "active" && p.id !== currentProduct.id
-    );
-  }
-
-  return bestMatch;
+  return null;
 }
 
 // ================= PRODUCT FETCH (CACHED + PAGINATION) =================
@@ -174,8 +150,12 @@ export default async function handler(req, res) {
     const replacement = await findReplacementProduct(product);
 
     if (!replacement) {
-      console.log("❌ No replacement found → exiting safely");
-      return res.status(200).end();
+      console.log("❌ No category product → removing + notifying");
+    
+      await processRemovalOnly(product);
+      await removeFromQueuedOrders(product);
+    
+      return res.status(200).json({ removed: true });
     }
 
     // ✅ STEP 2 — Update all subscriptions
@@ -192,6 +172,110 @@ export default async function handler(req, res) {
   }
 }
 
+async function processRemovalOnly(product) {
+  let page = 1;
+
+  while (true) {
+    const res = await axios.get(
+      "https://api.rechargeapps.com/subscriptions",
+      {
+        headers: {
+          "X-Recharge-Access-Token": RECHARGE_API_KEY,
+        },
+        params: {
+          shopify_product_id: product.id,
+          status: "ACTIVE",
+          limit: 250,
+          page,
+        },
+      }
+    );
+
+    const subs = res.data.subscriptions || [];
+    if (!subs.length) break;
+
+    for (const sub of subs) {
+      console.log(`🗑️ Removing sub ${sub.id}`);
+
+      await axios.delete(
+        `https://api.rechargeapps.com/subscriptions/${sub.id}`,
+        {
+          headers: {
+            "X-Recharge-Access-Token": RECHARGE_API_KEY,
+          },
+        }
+      );
+
+      // 📧 send email once
+      if (sub.email && !notifiedCustomers.has(sub.email)) {
+        const category = getPrimaryCategory(extractTags(product.tags)) || "this category";
+
+        await sendRemovalEmail(
+          sub.email,
+          sub.product_title,
+          category
+        );
+        notifiedCustomers.add(sub.email);
+      }
+
+      await delay(200);
+    }
+
+    page++;
+  }
+}
+
+async function removeFromQueuedOrders(product) {
+  let page = 1;
+
+  while (true) {
+    const res = await axios.get(
+      "https://api.rechargeapps.com/orders",
+      {
+        headers: {
+          "X-Recharge-Access-Token": RECHARGE_API_KEY,
+        },
+        params: {
+          status: "QUEUED",
+          limit: 250,
+          page,
+        },
+      }
+    );
+
+    const orders = res.data.orders || [];
+    if (!orders.length) break;
+
+    for (const order of orders) {
+      let updated = false;
+
+      const newLineItems = order.line_items.filter(item => {
+        if (String(item.shopify_product_id) === String(product.id)) {
+          updated = true;
+          return false; // remove item
+        }
+        return true;
+      });
+
+      if (updated) {
+        await axios.put(
+          `https://api.rechargeapps.com/orders/${order.id}`,
+          { line_items: newLineItems },
+          {
+            headers: {
+              "X-Recharge-Access-Token": RECHARGE_API_KEY,
+            },
+          }
+        );
+
+        console.log(`🗑️ Removed from order ${order.id}`);
+        await delay(200);
+      }
+    }
+
+    page++;
+  }
+}
 // ================= SEND EMAIL =================
 async function sendEmailNotification(email, oldProduct, newProduct) {
   try {
@@ -228,6 +312,30 @@ async function sendEmailNotification(email, oldProduct, newProduct) {
   }
 }
 
+async function sendRemovalEmail(email, dishName, category) {
+  await transporter.sendMail({
+    from: `"Farm to Home" <${process.env.EMAIL_USER}>`,
+    to: email,
+    subject: "Update to Your Subscription",
+    html: `
+      <p>Hello,</p>
+
+      <p>We wanted to inform you that <strong>${dishName}</strong> has been removed from your upcoming subscription orders as it is no longer available in its category (${category}).</p>
+
+      <p>At the moment, we do not have any dish available in this category.</p>
+
+      <p>
+        If you would like to add another dish, you can simply log in to your account and update your subscription:
+        <br/>
+        <a href="https://farmtohome.pt/account/login">
+          Manage your subscription
+        </a>
+      </p>
+
+      <p>Thank you 💚</p>
+    `,
+  });
+}
 // ================= PROCESS RECHARGE =================
 async function processRecharge(product, replacement) {
   let page = 1;
@@ -402,19 +510,62 @@ async function findReplacementProduct(product) {
   try {
     const products = await getProducts();
 
-    const match = findBestMatch(products, product);
-    if (!match) return null;
+    const currentTags = extractTags(product.tags);
+    const currentCategory = getPrimaryCategory(currentTags);
 
-    // 🔥 ADD THIS HERE
-    if (!match.variants?.length) {
-      console.log("⚠️ No variants found → skipping");
+    if (!currentCategory) {
+      console.log("❌ No valid category tag found");
+      return null;
+    }
+
+    // ✅ STEP 1: filter SAME CATEGORY
+    const sameCategoryProducts = products.filter(p => {
+      if (p.status !== "active" || p.id === product.id) return false;
+
+      const tags = extractTags(p.tags);
+      const category = getPrimaryCategory(tags);
+
+      return category === currentCategory;
+    });
+
+    if (!sameCategoryProducts.length) {
+      console.log("❌ No product in same category:", currentCategory);
+      return null;
+    }
+
+    // ✅ STEP 2: best tag match
+    let bestMatch = null;
+    let bestScore = -1;
+
+    for (const p of sameCategoryProducts) {
+      const tags = extractTags(p.tags);
+
+      const filteredCurrentTags = currentTags.filter(t => t !== currentCategory);
+      const filteredTags = tags.filter(t => t !== currentCategory);
+
+      const score = filteredCurrentTags.filter(tag =>
+        filteredTags.includes(tag)
+      ).length;
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatch = p;
+      }
+      
+      // 🔥 Early exit if perfect match found
+      if (bestScore === filteredCurrentTags.length) {
+        break;
+      }
+    }
+
+    if (!bestMatch || !bestMatch.variants?.length) {
       return null;
     }
 
     return {
-      product_id: match.id,
-      variant_id: match.variants?.[0]?.id || null,
-      title: match.title,
+      product_id: bestMatch.id,
+      variant_id: bestMatch.variants[0].id,
+      title: bestMatch.title,
     };
 
   } catch (err) {

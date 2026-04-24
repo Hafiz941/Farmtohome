@@ -195,26 +195,19 @@ async function processRemovalOnly(product) {
     if (!subs.length) break;
 
     for (const sub of subs) {
-      console.log(`🗑️ Removing sub ${sub.id}`);
+      console.log(`⚠️ NOT deleting subscription ${sub.id}`);
 
-      await axios.delete(
-        `https://api.rechargeapps.com/subscriptions/${sub.id}`,
-        {
-          headers: {
-            "X-Recharge-Access-Token": RECHARGE_API_KEY,
-          },
-        }
-      );
-
-      // 📧 send email once
+      // ✅ ONLY SEND EMAIL
       if (sub.email && !notifiedCustomers.has(sub.email)) {
-        const category = getPrimaryCategory(extractTags(product.tags)) || "this category";
+        const category =
+          getPrimaryCategory(extractTags(product.tags)) || "this category";
 
         await sendRemovalEmail(
           sub.email,
           sub.product_title,
           category
         );
+
         notifiedCustomers.add(sub.email);
       }
 

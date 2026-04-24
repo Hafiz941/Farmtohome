@@ -186,7 +186,7 @@ async function processRemovalOnly(product) {
           status: "ACTIVE",
           limit: 250,
           page,
-        }
+        },
       }
     );
 
@@ -194,30 +194,54 @@ async function processRemovalOnly(product) {
     if (!subs.length) break;
 
     for (const sub of subs) {
-      console.log(`⚠️ NOT deleting subscription ${sub.id}`);
-    
+
+      // ✅ Match product safely (ID + title fallback)
       const isSameProduct =
         String(sub.shopify_product_id) === String(product.id) ||
         sub.product_title?.toLowerCase() === product.title?.toLowerCase();
-    
-      if (!isSameProduct) {
-        continue;
-      }
-    
-      // ✅ SEND EMAIL
+
+      if (!isSameProduct) continue;
+
+      console.log(`⚠️ Handling removal for sub ${sub.id}`);
+
+      // ================= EMAIL =================
       if (sub.email && !notifiedCustomers.has(sub.email)) {
         const category =
-          getPrimaryCategory(extractTags(product.tags)) || "this category";
-    
+          getPrimaryCategory(extractTags(product.tags)) || "this dish category";
+
         await sendRemovalEmail(
           sub.email,
           sub.product_title,
           category
         );
-    
+
         notifiedCustomers.add(sub.email);
       }
-    
+
+      // ================= OPTIONAL: PREVENT REAPPEAR =================
+      try {
+        await axios.put(
+          `https://api.rechargeapps.com/subscriptions/${sub.id}`,
+          {
+            // safest approach → skip product by setting next charge date far OR quantity 0
+            quantity: 0,
+          },
+          {
+            headers: {
+              "X-Recharge-Access-Token": RECHARGE_API_KEY,
+            },
+          }
+        );
+
+        console.log(`🧹 Updated subscription ${sub.id} (prevent reappearance)`);
+
+      } catch (err) {
+        console.error(
+          "⚠️ Subscription update skipped:",
+          err.response?.data || err.message
+        );
+      }
+
       await delay(200);
     }
 
@@ -247,41 +271,39 @@ async function removeFromQueuedOrders(product) {
 
     for (const order of orders) {
 
-      // ✅ Handle ALL upcoming statuses
       if (!["QUEUED", "SCHEDULED", "PENDING"].includes(order.status)) {
         continue;
       }
 
-      let updated = false;
-
-      const newLineItems = order.line_items.filter(item => {
+      for (const item of order.line_items) {
 
         const isSameProduct =
           String(item.shopify_product_id) === String(product.id) ||
           item.title?.toLowerCase() === product.title?.toLowerCase();
 
-        if (isSameProduct) {
-          console.log(`🗑️ Removing item from order ${order.id}`);
-          updated = true;
-          return false; // remove item
+        if (!isSameProduct) continue;
+
+        console.log(`🗑️ Deleting item ${item.id} from order ${order.id}`);
+
+        try {
+          await axios.delete(
+            `https://api.rechargeapps.com/orders/${order.id}/line_items/${item.id}`,
+            {
+              headers: {
+                "X-Recharge-Access-Token": RECHARGE_API_KEY,
+              },
+            }
+          );
+
+          console.log(`✅ Removed item from order ${order.id}`);
+          await delay(200);
+
+        } catch (err) {
+          console.error(
+            "❌ Failed to delete item:",
+            err.response?.data || err.message
+          );
         }
-
-        return true;
-      });
-
-      if (updated) {
-        await axios.put(
-          `https://api.rechargeapps.com/orders/${order.id}`,
-          { line_items: newLineItems },
-          {
-            headers: {
-              "X-Recharge-Access-Token": RECHARGE_API_KEY,
-            },
-          }
-        );
-
-        console.log(`✅ Updated order ${order.id}`);
-        await delay(200);
       }
     }
 
@@ -430,49 +452,61 @@ async function updateQueuedOrders(product, replacement) {
 
       for (const order of orders) {
 
-        // ✅ Handle ALL upcoming statuses
+        // ✅ Only upcoming orders
         if (!["QUEUED", "SCHEDULED", "PENDING"].includes(order.status)) {
           continue;
         }
 
-        let updated = false;
-        const targetId = String(product.id);
-
-        const newLineItems = order.line_items.map(item => {
+        for (const item of order.line_items) {
 
           const isSameProduct =
-            String(item.shopify_product_id) === targetId ||
+            String(item.shopify_product_id) === String(product.id) ||
             item.title?.toLowerCase() === product.title?.toLowerCase();
 
-          if (isSameProduct) {
-            updated = true;
+          if (!isSameProduct) continue;
 
-            console.log(`🔄 Replacing item in order ${order.id}`);
+          console.log(`🔄 Swapping item in order ${order.id}`);
 
-            return {
-              ...item,
-              shopify_product_id: replacement.product_id,
-              shopify_variant_id: replacement.variant_id,
-              quantity: item.quantity, // preserve quantity
-            };
-          }
+          try {
+            // ================= DELETE OLD ITEM =================
+            await axios.delete(
+              `https://api.rechargeapps.com/orders/${order.id}/line_items/${item.id}`,
+              {
+                headers: {
+                  "X-Recharge-Access-Token": RECHARGE_API_KEY,
+                },
+              }
+            );
 
-          return item;
-        });
+            console.log(`🗑️ Removed old item from order ${order.id}`);
 
-        if (updated) {
-          await axios.put(
-            `https://api.rechargeapps.com/orders/${order.id}`,
-            { line_items: newLineItems },
-            {
-              headers: {
-                "X-Recharge-Access-Token": RECHARGE_API_KEY,
+            await delay(150);
+
+            // ================= ADD NEW ITEM =================
+            await axios.post(
+              `https://api.rechargeapps.com/orders/${order.id}/line_items`,
+              {
+                shopify_product_id: replacement.product_id,
+                shopify_variant_id: replacement.variant_id,
+                quantity: item.quantity || 1,
               },
-            }
-          );
+              {
+                headers: {
+                  "X-Recharge-Access-Token": RECHARGE_API_KEY,
+                },
+              }
+            );
 
-          console.log(`✅ Updated order ${order.id}`);
-          await delay(200);
+            console.log(`✅ Added replacement to order ${order.id}`);
+
+            await delay(200);
+
+          } catch (err) {
+            console.error(
+              "❌ Swap failed:",
+              err.response?.data || err.message
+            );
+          }
         }
       }
 
